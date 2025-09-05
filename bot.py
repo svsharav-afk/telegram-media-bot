@@ -2,61 +2,53 @@ import os
 import asyncio
 import logging
 from datetime import datetime
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, DefaultBotProperties
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession, ClientTimeout
 
 # === ЛОГИРОВАНИЕ ===
 LOG_FILE = "bot_activity.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+CLEANUP_TIMEOUT = 300  # 5 минут
+
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не установлен")
+    exit(1)
 
 if ADMIN_ID == 0:
     logger.warning("⚠️ ADMIN_ID не установлен! Модерация не будет работать")
 
-# === МИДЛВЕР ДЛЯ СБОРКИ И МОДЕРАЦИИ ===
+# === MIDDLEWARE ДЛЯ МЕДИА ===
 class MediaModerationMiddleware:
-    def __init__(self, bot=None):
+    def __init__(self, bot: Bot):
         self.buffers = {}
         self.bot = bot
-        self.CLEANUP_TIMEOUT = 300  # 5 минут
 
     async def _forward_to_admin(self, user_id: int, media_list: list):
         if not media_list or not ADMIN_ID:
             return
-
         user_info = media_list[0].from_user
         info_msg = (
             f"📩 Новые файлы от пользователя:\n"
             f"• ID: {user_info.id}\n"
             f"• Username: @{user_info.username or 'не указан'}\n"
-            f"• Имя: {user_info.first_name} {user_info.last_name or ''}\n"
+            f"• Имя: {user_info.full_name}\n"
             f"• Всего файлов: {len(media_list)}"
         )
-
         try:
             await self.bot.send_message(ADMIN_ID, info_msg)
             for msg in media_list:
                 if msg.photo or msg.video:
-                    await self.bot.forward_message(
-                        chat_id=ADMIN_ID,
-                        from_chat_id=msg.chat.id,
-                        message_id=msg.message_id
-                    )
-                    await asyncio.sleep(0.1)
+                    await self.bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
+                    await asyncio.sleep(0.05)
             await self.bot.send_message(ADMIN_ID, "✅ Все файлы пересланы.")
         except Exception as e:
             logger.error(f"Ошибка пересылки: {e}")
@@ -64,10 +56,7 @@ class MediaModerationMiddleware:
     async def _process_buffer(self, user_id: int):
         if user_id not in self.buffers:
             return
-
-        all_media = self.buffers[user_id]
-        del self.buffers[user_id]
-
+        all_media = self.buffers.pop(user_id)
         await self._forward_to_admin(user_id, all_media)
 
         for i in range(0, len(all_media), 10):
@@ -75,161 +64,74 @@ class MediaModerationMiddleware:
             media_group = MediaGroupBuilder()
             for msg in album:
                 if msg.photo:
-                    media_group.add_photo(media=msg.photo[-1].file_id)
+                    media_group.add_photo(msg.photo[-1].file_id)
                 elif msg.video:
-                    media_group.add_video(media=msg.video.file_id)
+                    media_group.add_video(msg.video.file_id)
 
             try:
-                await album[0].answer_media_group(media=media_group.build())
+                await album[0].answer_media_group(media_group.build())
                 photo_count = sum(1 for m in album if m.photo)
                 video_count = sum(1 for m in album if m.video)
-                logger.info(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"User {user_id} (@{album[0].from_user.username or 'unknown'}): "
-                    f"processed {len(album)} files ({photo_count} photos, {video_count} videos)"
-                )
+                logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                            f"User {user_id} (@{album[0].from_user.username or 'unknown'}): "
+                            f"processed {len(album)} files ({photo_count} photos, {video_count} videos)")
             except Exception as e:
                 logger.error(f"Ошибка отправки: {e}")
 
-    async def __call__(self, handler, message: Message, data):
-        # Админ-команды
-        if message.from_user.id == ADMIN_ID:
-            if message.text == "/admin":
-                await self._show_admin_panel(message)
-                return
-            elif message.text == "/logs":
-                await self._show_logs(message)
-                return
-
-        # Проверяем медиа
-        has_media = message.photo or message.video
-        if has_media:
+    async def __call__(self, handler, event, data):
+        message: types.Message = event
+        if message.photo or message.video:
             user_id = message.from_user.id
             if user_id not in self.buffers:
                 self.buffers[user_id] = []
                 asyncio.create_task(self._delayed_processing(user_id))
-
             if not any(m.message_id == message.message_id for m in self.buffers[user_id]):
                 self.buffers[user_id].append(message)
-                return  # не передаем дальше
-
-        return await handler(message, data)
+            return  # не передаем дальше
+        return await handler(event, data)
 
     async def _delayed_processing(self, user_id: int):
         await asyncio.sleep(1.5)
         await self._process_buffer(user_id)
 
-    async def _show_admin_panel(self, message: Message):
-        active_users = len(self.buffers)
-        total_files = sum(len(buf) for buf in self.buffers.values())
-        status = f"📊 Статус бота:\n• Активных пользователей: {active_users}\n• Файлов в обработке: {total_files}"
-        await message.answer(status)
-
-    async def _show_logs(self, message: Message):
-        if not os.path.exists(LOG_FILE):
-            await message.answer("Логи пусты")
-            return
-        try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                logs = f.readlines()[-20:]
-            log_text = "📋 Последние операции:\n\n" + "".join(logs)
-            await message.answer(log_text[:4000])
-        except Exception as e:
-            await message.answer(f"Ошибка: {str(e)}")
-
     async def _cleanup_inactive_buffers(self):
         while True:
-            await asyncio.sleep(self.CLEANUP_TIMEOUT)
+            await asyncio.sleep(CLEANUP_TIMEOUT)
             current_time = datetime.now().timestamp()
-            inactive_users = []
-            for user_id, buffer in self.buffers.items():
-                if buffer and (current_time - buffer[-1].date.timestamp()) > self.CLEANUP_TIMEOUT:
-                    inactive_users.append(user_id)
-            for user_id in inactive_users:
-                del self.buffers[user_id]
-                logger.info(f"Очищен неактивный буфер пользователя {user_id}")
+            inactive_users = [uid for uid, buf in self.buffers.items()
+                              if buf and (current_time - buf[-1].date.timestamp()) > CLEANUP_TIMEOUT]
+            for uid in inactive_users:
+                del self.buffers[uid]
+                logger.info(f"Очищен неактивный буфер пользователя {uid}")
 
-
-# === ЗАПУСК БОТА ===
+# === MAIN ===
 async def main():
-    if not BOT_TOKEN:
-        logger.error("❌ ОШИБКА: BOT_TOKEN не установлен!")
-        return
-
-    timeout = ClientTimeout(total=60.0, connect=15.0, sock_read=30.0, sock_connect=15.0)
-    session = ClientSession(timeout=timeout)
-
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"), session=session)
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
     dp = Dispatcher()
 
-    # Сброс зависших апдейтов
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Middleware
+    dp.message.middleware(MediaModerationMiddleware(bot))
 
-    middleware = MediaModerationMiddleware(bot=bot)
-    dp.message.middleware(middleware)
-
+    # Старт
     @dp.message(F.text == "/start")
-    async def cmd_start(message: Message):
-        welcome_text = (
-            "Create albums from forwarded media!\n\n"
-            "Features ✨\n"
-            "• Auto creation: forward items and get a media album.\n"
-            "• Images and videos supported."
-        )
-        await message.answer(welcome_text)
+    async def cmd_start(msg: types.Message):
+        await msg.answer("Привет! Отправляйте фото и видео, бот соберет их в альбомы.")
 
+    # Хелп
     @dp.message(F.text == "/help")
-    async def cmd_help(message: Message):
-        help_text = (
-            "How to use 🛠\n\n"
-            "1. Send photos/videos one by one or in groups.\n"
-            "2. Bot collects them into albums of 10 items.\n"
-            "3. Result sent 1.5 seconds after last file.\n\n"
-            "📌 Example: 19 photos → 2 albums (10 + 9)\n"
-            "⚠️ Send as photo/video, not as file."
-        )
-        await message.answer(help_text)
+    async def cmd_help(msg: types.Message):
+        await msg.answer("Отправляйте фото/видео. Бот объединит их в альбомы по 10 файлов.")
 
-    port = int(os.getenv("PORT", "10000"))
+    # Запуск очистки буферов
+    asyncio.create_task(dp.message.middleware_stack[0]._cleanup_inactive_buffers())
 
-    # Веб-сервер
-    app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/")
-    setup_application(app, dp, bot=bot)
-
-    async def on_shutdown(app):
-        await bot.session.close()
-        await session.close()
-        logger.info("Бот остановлен, сессии закрыты")
-
-    app.on_cleanup.append(on_shutdown)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
-    await site.start()
-
-    # Вебхук
-    service_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}.onrender.com"
-    webhook_url = f"{service_url}/"
-    try:
-        await bot.set_webhook(webhook_url)
-        logger.info(f"🌍 Webhook установлен: {webhook_url}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки вебхука: {e}")
-
-    logger.info(f"✅ Бот запущен на порту {port}")
-    asyncio.create_task(middleware._cleanup_inactive_buffers())
-    await asyncio.Event().wait()
-
+    # Запуск polling (для бесплатного Render лучше polling)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    if not os.path.exists(LOG_FILE):
-        open(LOG_FILE, "w", encoding="utf-8").close()
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\nБот остановлен вручную")
+        logger.info("Бот остановлен вручную")
     except Exception as e:
         logger.exception(f"Критическая ошибка: {e}")
