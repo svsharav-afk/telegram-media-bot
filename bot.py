@@ -154,15 +154,17 @@ async def main():
         print("❌ ОШИБКА: BOT_TOKEN не установлен! Проверьте переменные окружения.")
         return
 
-    # Настройка таймаута через aiohttp
-    timeout = ClientTimeout(total=30)
-    session = ClientSession(timeout=timeout)
+    from aiogram.types import DefaultBotProperties  # ← Добавьте в начало файла
 
-    bot = Bot(
-        token=BOT_TOKEN,
-        parse_mode="HTML",
-        session=session
-    )
+# Настройка таймаута через aiohttp
+timeout = ClientTimeout(total=30)
+session = ClientSession(timeout=timeout)
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML"),
+    session=session
+)
     dp = Dispatcher()
 
     # Сброс зависших апдейтов перед установкой вебхука
@@ -202,8 +204,9 @@ async def main():
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
     setup_application(app, dp, bot=bot)
 
-    async def on_shutdown(app):
-        await bot.session.close()
+async def on_shutdown(app):
+    await bot.session.close()
+    await session.close()
 
     app.on_cleanup.append(on_shutdown)
 
