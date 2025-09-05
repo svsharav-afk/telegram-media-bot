@@ -226,7 +226,7 @@ async def main():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCSite(runner, host="0.0.0.0", port=port)
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
     print(f"✅ Бот запущен на порту {port}")
