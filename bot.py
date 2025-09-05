@@ -3,11 +3,10 @@ import asyncio
 import logging
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.client.default import DefaultBotProperties
+from aiogram.types import Message, DefaultBotProperties
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -151,10 +150,16 @@ async def main():
         logger.error("❌ BOT_TOKEN не установлен!")
         return
 
-    timeout = ClientTimeout(total=60.0, connect=15.0, sock_read=30.0, sock_connect=15.0)
-    session = ClientSession(timeout=timeout)
-
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"), session=session)
+    # Правильная настройка бота для aiogram 3.x
+    # Используем DefaultBotProperties для настройки таймаутов
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(
+            parse_mode="HTML",
+            request_timeout=60.0  # Увеличенный таймаут для запросов к Telegram API
+        )
+    )
+    
     dp = Dispatcher()
 
     # Сброс зависших апдейтов
@@ -188,8 +193,7 @@ async def main():
 
     async def on_shutdown(app):
         await bot.session.close()
-        await session.close()
-        logger.info("Бот остановлен, сессии закрыты")
+        logger.info("Бот остановлен, сессия закрыта")
 
     app.on_cleanup.append(on_shutdown)
 
@@ -198,8 +202,15 @@ async def main():
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
-    # Render бесплатный тариф — используем localhost
-    webhook_url = f"https://localhost:{port}/"
+    # Правильная настройка вебхука для Render
+    # Используем RENDER_EXTERNAL_HOSTNAME, если доступен
+    service_url = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if service_url:
+        webhook_url = f"https://{service_url}/"
+    else:
+        # Для локальной разработки
+        webhook_url = f"http://0.0.0.0:{port}/"
+    
     try:
         await bot.set_webhook(webhook_url)
         logger.info(f"🌍 Webhook установлен: {webhook_url}")
