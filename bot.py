@@ -130,14 +130,44 @@ class MediaModerationMiddleware:
         except Exception as e:
             await message.answer(f"Ошибка: {str(e)}")
 
+# === КОМАНДЫ БОТА ===
+@dp.message(F.text == "/start")
+async def cmd_start(message: Message):
+    """Приветственное сообщение"""
+    welcome_text = (
+        "Create albums from forwarded media!\n\n"
+        "Features ✨\n"
+        "• Auto creation, just forward all the items at once and the bot will reply with a nice media album.\n"
+        "• Images and videos supported."
+    )
+    await message.answer(welcome_text)
+
+@dp.message(F.text == "/help")
+async def cmd_help(message: Message):
+    """Краткая помощь"""
+    help_text = (
+        "How to use 🛠\n\n"
+        "1. Send photos and videos one by one or in groups.\n"
+        "2. The bot will automatically collect them into albums of 10 items.\n"
+        "3. You'll get the result 1.5 seconds after the last file.\n\n"
+        "📌 Example:\n"
+        "You sent 19 photos → bot sends 2 albums: (10 + 9)\n\n"
+        "⚠️ Important: send as photo/video, not as file."
+    )
+    await message.answer(help_text)
+
+@dp.message()
+async def handle_all(message: Message):
+    """Пропускаем команды /start и /help, остальное обрабатывает middleware"""
+    if message.text and message.text.startswith("/"):
+        return
+    pass
+
+# === ЗАПУСК БОТА ===
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.message.middleware(MediaModerationMiddleware(bot=bot))
-
-    @dp.message()
-    async def handle_all(message: Message):
-        pass
 
     # Получаем порт от Render
     port = int(os.getenv("PORT", "10000"))
@@ -157,4 +187,8 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
+    # Создаем файл логов, если его нет
+    if not os.path.exists(LOG_FILE):
+        open(LOG_FILE, "w", encoding="utf-8").close()
+    
     asyncio.run(main())
