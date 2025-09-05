@@ -168,57 +168,31 @@ class MediaModerationMiddleware:
 
 # === ЗАПУСК БОТА ===
 async def main():
-    # Проверка обязательных переменных
     if not BOT_TOKEN:
         print("❌ ОШИБКА: BOT_TOKEN не установлен! Проверьте переменные окружения.")
         return
-    
+
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
-    
-    # Создаем и регистрируем middleware
+
+    # Создаём и регистрируем middleware
     middleware = MediaModerationMiddleware(bot=bot)
     dp.message.middleware(middleware)
-    
-    # РЕГИСТРИРУЕМ ХЕНДЛЕРЫ ТОЛЬКО ПОСЛЕ СОЗДАНИЯ dp
+
+    # === Хендлеры ===
     @dp.message(F.text == "/start")
     async def cmd_start(message: Message):
-        """Приветственное сообщение"""
-        welcome_text = (
-            "Create albums from forwarded media!\n\n"
-            "Features ✨\n"
-            "• Auto creation, just forward all the items at once and the bot will reply with a nice media album.\n"
-            "• Images and videos supported."
+        await message.answer(
+            "Привет 👋 Я собираю медиа в альбомы!\n\n"
+            "Просто пришли фото или видео — и я соберу их в альбом 📂"
         )
-        await message.answer(welcome_text)
 
     @dp.message(F.text == "/help")
     async def cmd_help(message: Message):
-        """Краткая помощь"""
-        help_text = (
-            "How to use 🛠\n\n"
-            "1. Send photos and videos one by one or in groups.\n"
-            "2. The bot will automatically collect them into albums of 10 items.\n"
-            "3. You'll get the result 1.5 seconds after the last file.\n\n"
-            "📌 Example:\n"
-            "You sent 19 photos → bot sends 2 albums: (10 + 9)\n\n"
-            "⚠️ Important: send as photo/video, not as file."
-        )
-        await message.answer(help_text)
+        await message.answer("Помощь: пришли фото/видео, и бот сделает альбом.")
 
-    @dp.message()
-    async def handle_all(message: Message):
-        """Обрабатываем все остальные сообщения"""
-        # Команды уже обработаны выше
-        if message.text and message.text.startswith("/"):
-            return
-        # Остальные сообщения обрабатываются middleware
-        pass
-
-    # Получаем порт от Render
+    # === Webhook часть ===
     port = int(os.getenv("PORT", "10000"))
-    
-    # Настраиваем вебхук
     webhook_path = "/"
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
@@ -229,14 +203,19 @@ async def main():
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
+    # 👉 Вот тут самое важное — ставим вебхук
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'telegram-media-bot-1xox.onrender.com')}/"
+    try:
+        await bot.set_webhook(webhook_url)
+        print(f"🌍 Webhook установлен: {webhook_url}")
+    except Exception as e:
+        print(f"❌ Ошибка установки вебхука: {e}")
+
     print(f"✅ Бот запущен на порту {port}")
-    print(f"ℹ️ Доступен по URL: https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}:{port}")
-    
-    # Запускаем фоновую задачу для очистки буферов
     asyncio.create_task(middleware._cleanup_inactive_buffers())
-    
-    # Ожидаем завершения
+
     await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
     # Создаем файл логов, если его нет
