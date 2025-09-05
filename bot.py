@@ -5,8 +5,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.client.default import DefaultBotProperties
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -15,7 +14,6 @@ LOG_FILE = "bot_activity.log"
 
 if ADMIN_ID == 0:
     print("⚠️ ADMIN_ID не установлен! Модерация не будет работать")
-
 
 # === МИДЛВЕР ДЛЯ СБОРКИ И МОДЕРАЦИИ ===
 class MediaModerationMiddleware:
@@ -71,8 +69,7 @@ class MediaModerationMiddleware:
 
             try:
                 await album[0].answer_media_group(
-                    media=media_group.build(),
-                    request_timeout=120
+                    media=media_group.build()
                 )
                 photo_count = sum(1 for m in album if m.photo)
                 video_count = sum(1 for m in album if m.video)
@@ -151,16 +148,20 @@ class MediaModerationMiddleware:
             del self.buffers[user_id]
             print(f"Очищен неактивный буфер пользователя {user_id}")
 
-
 # === ЗАПУСК БОТА ===
 async def main():
     if not BOT_TOKEN:
         print("❌ ОШИБКА: BOT_TOKEN не установлен! Проверьте переменные окружения.")
         return
 
+    # Настройка таймаута через aiohttp
+    timeout = ClientTimeout(total=30)
+    session = ClientSession(timeout=timeout)
+
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode="HTML", request_timeout=30)
+        parse_mode="HTML",
+        session=session
     )
     dp = Dispatcher()
 
@@ -173,13 +174,23 @@ async def main():
     @dp.message(F.text == "/start")
     async def cmd_start(message: Message):
         await message.answer(
-            "Привет 👋 Я собираю медиа в альбомы!\n\n"
-            "Просто пришли фото или видео — и я соберу их в альбом 📂"
+            "Create albums from forwarded media!\n\n"
+            "Features ✨\n"
+            "• Auto creation, just forward all the items at once and the bot will reply with a nice media album.\n"
+            "• Images and videos supported."
         )
 
     @dp.message(F.text == "/help")
     async def cmd_help(message: Message):
-        await message.answer("Помощь: пришли фото/видео, и бот сделает альбом.")
+        await message.answer(
+            "How to use 🛠\n\n"
+            "1. Send photos and videos one by one or in groups.\n"
+            "2. The bot will automatically collect them into albums of 10 items.\n"
+            "3. You'll get the result 1.5 seconds after the last file.\n\n"
+            "📌 Example:\n"
+            "You sent 19 photos → bot sends 2 albums: (10 + 9)\n\n"
+            "⚠️ Important: send as photo/video, not as file."
+        )
 
     @dp.message()
     async def handle_all(message: Message):
@@ -191,14 +202,22 @@ async def main():
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
     setup_application(app, dp, bot=bot)
 
+    async def on_shutdown(app):
+        await bot.session.close()
+
+    app.on_cleanup.append(on_shutdown)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'telegram-media-bot-1xox.onrender.com')}/"
-    await bot.set_webhook(webhook_url)
-    print(f"🌍 Webhook установлен: {webhook_url}")
+    # === КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ===
+    # RENDER_EXTERNAL_HOSTNAME не работает на бесплатном тарифе
+    # Используйте URL сервиса из панели управления Render
+    SERVICE_URL = "https://telegram-media-bot-1xox.onrender.com"  # ← ЗАМЕНИТЕ НА ВАШ URL
+    await bot.set_webhook(f"{SERVICE_URL}/")
+    print(f"🌍 Webhook установлен: {SERVICE_URL}")
     print(f"✅ Бот запущен на порту {port}")
 
     asyncio.create_task(middleware._cleanup_inactive_buffers())
