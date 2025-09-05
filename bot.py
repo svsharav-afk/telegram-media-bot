@@ -8,10 +8,21 @@ from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, ClientSession, ClientTimeout
 
+# === ЛОГИРОВАНИЕ ===
+LOG_FILE = "bot_activity.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-LOG_FILE = "bot_activity.log"
 
 if ADMIN_ID == 0:
     logger.warning("⚠️ ADMIN_ID не установлен! Модерация не будет работать")
@@ -69,17 +80,40 @@ class MediaModerationMiddleware:
                     media_group.add_video(media=msg.video.file_id)
 
             try:
-                await album[0].answer_media_group(
-                    media=media_group.build()
-                )
+                await album[0].answer_media_group(media=media_group.build())
                 photo_count = sum(1 for m in album if m.photo)
                 video_count = sum(1 for m in album if m.video)
-                logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] User {user_id} (@{album[0].from_user.username or 'unknown'}): processed {len(album)} files ({photo_count} photos, {video_count} videos)")
+                logger.info(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"User {user_id} (@{album[0].from_user.username or 'unknown'}): "
+                    f"processed {len(album)} files ({photo_count} photos, {video_count} videos)"
+                )
             except Exception as e:
                 logger.error(f"Ошибка отправки: {e}")
 
     async def __call__(self, handler, message: Message, data):
-        # ... [остаток кода без изменений] ...
+        # Админ-команды
+        if message.from_user.id == ADMIN_ID:
+            if message.text == "/admin":
+                await self._show_admin_panel(message)
+                return
+            elif message.text == "/logs":
+                await self._show_logs(message)
+                return
+
+        # Проверяем медиа
+        has_media = message.photo or message.video
+        if has_media:
+            user_id = message.from_user.id
+            if user_id not in self.buffers:
+                self.buffers[user_id] = []
+                asyncio.create_task(self._delayed_processing(user_id))
+
+            if not any(m.message_id == message.message_id for m in self.buffers[user_id]):
+                self.buffers[user_id].append(message)
+                return  # не передаем дальше
+
+        return await handler(message, data)
 
     async def _delayed_processing(self, user_id: int):
         await asyncio.sleep(1.5)
@@ -115,40 +149,31 @@ class MediaModerationMiddleware:
                 del self.buffers[user_id]
                 logger.info(f"Очищен неактивный буфер пользователя {user_id}")
 
+
 # === ЗАПУСК БОТА ===
 async def main():
     if not BOT_TOKEN:
         logger.error("❌ ОШИБКА: BOT_TOKEN не установлен!")
         return
 
-    timeout = ClientTimeout(
-        total=60.0,
-        connect=15.0,
-        sock_read=30.0,
-        sock_connect=15.0
-    )
-    
+    timeout = ClientTimeout(total=60.0, connect=15.0, sock_read=30.0, sock_connect=15.0)
     session = ClientSession(timeout=timeout)
-    
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode="HTML"),
-        session=session
-    )
-    
+
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"), session=session)
     dp = Dispatcher()
-    
+
+    # Сброс зависших апдейтов
     await bot.delete_webhook(drop_pending_updates=True)
-    
+
     middleware = MediaModerationMiddleware(bot=bot)
     dp.message.middleware(middleware)
-    
+
     @dp.message(F.text == "/start")
     async def cmd_start(message: Message):
         welcome_text = (
             "Create albums from forwarded media!\n\n"
             "Features ✨\n"
-            "• Auto creation, just forward all the items at once and the bot will reply with a nice media album.\n"
+            "• Auto creation: forward items and get a media album.\n"
             "• Images and videos supported."
         )
         await message.answer(welcome_text)
@@ -157,24 +182,25 @@ async def main():
     async def cmd_help(message: Message):
         help_text = (
             "How to use 🛠\n\n"
-            "1. Send photos and videos one by one or in groups.\n"
-            "2. The bot will automatically collect them into albums of 10 items.\n"
-            "3. You'll get the result 1.5 seconds after the last file.\n\n"
-            "📌 Example:\n"
-            "You sent 19 photos → bot sends 2 albums: (10 + 9)\n\n"
-            "⚠️ Important: send as photo/video, not as file."
+            "1. Send photos/videos one by one or in groups.\n"
+            "2. Bot collects them into albums of 10 items.\n"
+            "3. Result sent 1.5 seconds after last file.\n\n"
+            "📌 Example: 19 photos → 2 albums (10 + 9)\n"
+            "⚠️ Send as photo/video, not as file."
         )
         await message.answer(help_text)
 
     port = int(os.getenv("PORT", "10000"))
-    
+
+    # Веб-сервер
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/")
     setup_application(app, dp, bot=bot)
 
     async def on_shutdown(app):
         await bot.session.close()
-        logger.info("Бот остановлен, сессия закрыта")
+        await session.close()
+        logger.info("Бот остановлен, сессии закрыты")
 
     app.on_cleanup.append(on_shutdown)
 
@@ -183,9 +209,9 @@ async def main():
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
+    # Вебхук
     service_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}.onrender.com"
     webhook_url = f"{service_url}/"
-    
     try:
         await bot.set_webhook(webhook_url)
         logger.info(f"🌍 Webhook установлен: {webhook_url}")
@@ -193,25 +219,14 @@ async def main():
         logger.error(f"❌ Ошибка установки вебхука: {e}")
 
     logger.info(f"✅ Бот запущен на порту {port}")
-    
     asyncio.create_task(middleware._cleanup_inactive_buffers())
-    
     await asyncio.Event().wait()
 
+
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_FILE),
-            logging.StreamHandler()
-        ]
-    )
-    logger = logging.getLogger(__name__)
-    
     if not os.path.exists(LOG_FILE):
         open(LOG_FILE, "w", encoding="utf-8").close()
-    
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
