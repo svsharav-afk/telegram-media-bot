@@ -5,28 +5,29 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.client.default import DefaultBotProperties
 from aiohttp import web
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Должен быть числом
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 LOG_FILE = "bot_activity.log"
 
 if ADMIN_ID == 0:
     print("⚠️ ADMIN_ID не установлен! Модерация не будет работать")
+
 
 # === МИДЛВЕР ДЛЯ СБОРКИ И МОДЕРАЦИИ ===
 class MediaModerationMiddleware:
     def __init__(self, bot=None):
         self.buffers = {}
         self.bot = bot
-        # Таймаут очистки старых буферов (в секундах)
         self.CLEANUP_TIMEOUT = 300  # 5 минут
 
     async def _forward_to_admin(self, user_id: int, media_list: list):
         if not media_list or not ADMIN_ID:
             return
-            
+
         user_info = media_list[0].from_user
         info_msg = (
             f"📩 Новые файлы от пользователя:\n"
@@ -35,7 +36,7 @@ class MediaModerationMiddleware:
             f"• Имя: {user_info.first_name} {user_info.last_name or ''}\n"
             f"• Всего файлов: {len(media_list)}"
         )
-        
+
         try:
             await self.bot.send_message(ADMIN_ID, info_msg)
             for msg in media_list:
@@ -53,21 +54,21 @@ class MediaModerationMiddleware:
     async def _process_buffer(self, user_id: int):
         if user_id not in self.buffers:
             return
-            
+
         all_media = self.buffers[user_id]
         del self.buffers[user_id]
-        
+
         await self._forward_to_admin(user_id, all_media)
-        
+
         for i in range(0, len(all_media), 10):
-            album = all_media[i:i+10]
+            album = all_media[i:i + 10]
             media_group = MediaGroupBuilder()
             for msg in album:
                 if msg.photo:
                     media_group.add_photo(media=msg.photo[-1].file_id)
                 elif msg.video:
                     media_group.add_video(media=msg.video.file_id)
-            
+
             try:
                 await album[0].answer_media_group(
                     media=media_group.build(),
@@ -96,7 +97,6 @@ class MediaModerationMiddleware:
             print(f"Ошибка записи в лог: {e}")
 
     async def __call__(self, handler, message: Message, data):
-        # 1. Проверяем админ-команды
         if message.from_user.id == ADMIN_ID:
             if message.text == "/admin":
                 await self._show_admin_panel(message)
@@ -104,40 +104,31 @@ class MediaModerationMiddleware:
             elif message.text == "/logs":
                 await self._show_logs(message)
                 return
-        
-        # 2. Проверяем, есть ли фото или видео
+
         has_media = message.photo or message.video
         if has_media:
             user_id = message.from_user.id
-            # Инициализируем буфер для пользователя
             if user_id not in self.buffers:
                 self.buffers[user_id] = []
-                # Запускаем обработку через 1.5 сек
                 asyncio.create_task(self._delayed_processing(user_id))
-            
-            # Добавляем сообщение в буфер (без дублей)
+
             if not any(m.message_id == message.message_id for m in self.buffers[user_id]):
                 self.buffers[user_id].append(message)
-                # ВАЖНО: НЕ передаем сообщение дальше по цепочке
                 return
-        
-        # Передаем управление дальше только для не-медиа сообщений
+
         return await handler(message, data)
-    
+
     async def _delayed_processing(self, user_id: int):
-        """Задержанная обработка буфера"""
         await asyncio.sleep(1.5)
         await self._process_buffer(user_id)
-    
+
     async def _show_admin_panel(self, message: Message):
-        """Показывает админ-панель"""
         active_users = len(self.buffers)
         total_files = sum(len(buf) for buf in self.buffers.values())
         status = f"📊 Статус бота:\n• Активных пользователей: {active_users}\n• Файлов в обработке: {total_files}"
         await message.answer(status)
-    
+
     async def _show_logs(self, message: Message):
-        """Показывает последние логи"""
         if not os.path.exists(LOG_FILE):
             await message.answer("Логи пусты")
             return
@@ -148,23 +139,18 @@ class MediaModerationMiddleware:
             await message.answer(log_text[:4000])
         except Exception as e:
             await message.answer(f"Ошибка: {str(e)}")
-    
+
     async def _cleanup_inactive_buffers(self):
-        """Очищает старые буферы для предотвращения утечки памяти"""
         await asyncio.sleep(self.CLEANUP_TIMEOUT)
-        
         current_time = datetime.now().timestamp()
         inactive_users = []
-        
         for user_id, buffer in self.buffers.items():
-            # Если буфер не обновлялся более CLEANUP_TIMEOUT секунд
             if buffer and (current_time - buffer[-1].date.timestamp()) > self.CLEANUP_TIMEOUT:
                 inactive_users.append(user_id)
-        
-        # Удаляем неактивные буферы
         for user_id in inactive_users:
             del self.buffers[user_id]
             print(f"Очищен неактивный буфер пользователя {user_id}")
+
 
 # === ЗАПУСК БОТА ===
 async def main():
@@ -172,14 +158,18 @@ async def main():
         print("❌ ОШИБКА: BOT_TOKEN не установлен! Проверьте переменные окружения.")
         return
 
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode="HTML", request_timeout=30)
+    )
     dp = Dispatcher()
 
-    # Создаём и регистрируем middleware
+    # Сброс зависших апдейтов перед установкой вебхука
+    await bot.delete_webhook(drop_pending_updates=True)
+
     middleware = MediaModerationMiddleware(bot=bot)
     dp.message.middleware(middleware)
 
-    # === Хендлеры ===
     @dp.message(F.text == "/start")
     async def cmd_start(message: Message):
         await message.answer(
@@ -191,7 +181,10 @@ async def main():
     async def cmd_help(message: Message):
         await message.answer("Помощь: пришли фото/видео, и бот сделает альбом.")
 
-    # === Webhook часть ===
+    @dp.message()
+    async def handle_all(message: Message):
+        pass
+
     port = int(os.getenv("PORT", "10000"))
     webhook_path = "/"
     app = web.Application()
@@ -203,25 +196,19 @@ async def main():
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
 
-    # 👉 Вот тут самое важное — ставим вебхук
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'telegram-media-bot-1xox.onrender.com')}/"
-    try:
-        await bot.set_webhook(webhook_url)
-        print(f"🌍 Webhook установлен: {webhook_url}")
-    except Exception as e:
-        print(f"❌ Ошибка установки вебхука: {e}")
-
+    await bot.set_webhook(webhook_url)
+    print(f"🌍 Webhook установлен: {webhook_url}")
     print(f"✅ Бот запущен на порту {port}")
-    asyncio.create_task(middleware._cleanup_inactive_buffers())
 
+    asyncio.create_task(middleware._cleanup_inactive_buffers())
     await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    # Создаем файл логов, если его нет
     if not os.path.exists(LOG_FILE):
         open(LOG_FILE, "w", encoding="utf-8").close()
-    
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
